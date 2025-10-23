@@ -1,174 +1,108 @@
+import os
 import asyncio
-import logging
-import aiosqlite
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputFile
-from aiogram.filters import Command
-from gtts import gTTS
-from io import BytesIO
 import random
-from flask import Flask
-import threading
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask, request
+from gtts import gTTS
 
-# ==== НАСТРОЙКИ ====
-API_TOKEN = "8216736672:AAHvpl2_KUk04U9ofPa5Fr4MPUwwk-XjIyk"  # <-- вставь свой токен
-DB_FILE = "german_bot.db"
+# =====================
+# Настройки
+# =====================
+TOKEN = os.getenv("TOKEN") or "ТВОЙ_ТОКЕН_СЮДА"
+APP_URL = os.getenv("APP_URL") or "https://deutsch-me-bot.onrender.com"  # замени на свой Render URL
+PORT = int(os.getenv("PORT", 5000))
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"{APP_URL}{WEBHOOK_PATH}"
+
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
-quiz_data = {}
-last_vocab_id = None
+app = Flask(__name__)
 
-# ==== Flask для Uptime Robot ====
-app = Flask("")
+# =====================
+# Данные для словаря и викторины
+# =====================
+vocab_list = [
+    {"de": "Haus", "ru": "Дом"},
+    {"de": "Hund", "ru": "Собака"},
+    {"de": "Katze", "ru": "Кошка"},
+]
 
-@app.route("/")
-def home():
-    return "Bot is running!"
+quiz_list = [
+    {"question": "Что значит 'Haus'?", "options": ["Дом", "Кошка", "Собака"], "answer": "Дом"},
+    {"question": "Что значит 'Hund'?", "options": ["Кошка", "Собака", "Дом"], "answer": "Собака"},
+]
 
-def run_flask():
-    app.run(host="0.0.0.0", port=5000)  # порт 5000, чтобы 8080 не конфликтовал
+# =====================
+# Команды
+# =====================
+@dp.message(commands=["start"])
+async def cmd_start(message: types.Message):
+    await message.answer("👋 Привет! Я Deutsch_me_Bot 🇩🇪\n\nКоманды:\n/vocab — изучение слов\n/quiz — викторина")
 
-threading.Thread(target=run_flask, daemon=True).start()
+@dp.message(commands=["vocab"])
+async def cmd_vocab(message: types.Message):
+    word = random.choice(vocab_list)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔊 Прослушать", callback_data=f"tts_{word['de']}"))
+    await message.answer(f"{word['de']} — {word['ru']}", reply_markup=markup)
 
-# ==== ИНИЦИАЛИЗАЦИЯ БД ====
-async def init_db():
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS vocab (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT,
-            translation TEXT,
-            example TEXT
-        )""")
-        cur = await db.execute("SELECT COUNT(*) FROM vocab")
-        count = (await cur.fetchone())[0]
-        if count == 0:
-            sample = [
-                ("Guten Morgen", "Доброе утро", "Guten Morgen! Wie geht's?"),
-                ("Danke", "Спасибо", "Danke für deine Hilfe."),
-                ("Bitte", "Пожалуйста", "Bitte sehr."),
-                ("Entschuldigung", "Извините", "Entschuldigung, wo ist die Toilette?"),
-            ]
-            await db.executemany("INSERT INTO vocab (word, translation, example) VALUES (?, ?, ?)", sample)
-        await db.commit()
+@dp.message(commands=["quiz"])
+async def cmd_quiz(message: types.Message):
+    q = random.choice(quiz_list)
+    markup = InlineKeyboardMarkup()
+    for opt in q["options"]:
+        markup.add(InlineKeyboardButton(opt, callback_data=f"quiz_{opt}_{q['answer']}"))
+    await message.answer(q["question"], reply_markup=markup)
 
-# ==== ПОЛУЧЕНИЕ СЛУЧАЙНОГО СЛОВА ====
-async def get_random_vocab(exclude_id=None):
-    async with aiosqlite.connect(DB_FILE) as db:
-        if exclude_id:
-            cur = await db.execute(
-                "SELECT id, word, translation, example FROM vocab WHERE id != ? ORDER BY RANDOM() LIMIT 1",
-                (exclude_id,)
-            )
-        else:
-            cur = await db.execute(
-                "SELECT id, word, translation, example FROM vocab ORDER BY RANDOM() LIMIT 1"
-            )
-        row = await cur.fetchone()
-        return row
-
-# ==== ГЕНЕРАЦИЯ TTS в памяти ====
-def make_tts_bytes(word):
+# =====================
+# Callback кнопки
+# =====================
+@dp.callback_query(lambda c: c.data.startswith("tts_"))
+async def callback_tts(callback: types.CallbackQuery):
+    word = callback.data[4:]
     tts = gTTS(text=word, lang="de")
-    bio = BytesIO()
-    tts.write_to_fp(bio)
-    bio.seek(0)
-    return bio
+    filename = f"audio_{word}.mp3"
+    tts.save(filename)
+    await callback.message.answer_audio(types.FSInputFile(filename))
+    os.remove(filename)
+    await callback.answer()
 
-# ==== /start ====
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    text = (
-        "👋 Привет! Я — *Deutsch_me_Bot*, бот для изучения немецкого 🇩🇪.\n\n"
-        "Доступные команды:\n"
-        "• /vocab — карточка слова с озвучкой\n"
-        "• /quiz — небольшая викторина\n"
-        "• /help — справка"
-    )
-    await message.answer(text, parse_mode="Markdown")
-
-# ==== /help ====
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    await message.answer("📚 Команды:\n/start — начать\n/vocab — карточка слова с озвучкой\n/quiz — викторина")
-
-# ==== /vocab с озвучкой ====
-@dp.message(Command("vocab"))
-async def cmd_vocab(message: Message):
-    global last_vocab_id
-    vocab = await get_random_vocab(exclude_id=last_vocab_id)
-    if not vocab:
-        await message.answer("Слова не найдены 😢")
-        return
-
-    vid, word, translation, example = vocab
-    last_vocab_id = vid
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➡️ Следующее", callback_data="next")]
-    ])
-
-    text = f"**{word}** — {translation}\n\n_Пример:_ {example}"
-    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
-
-    tts_audio = make_tts_bytes(word)
-    await message.answer_audio(InputFile(tts_audio, filename=f"{word}.mp3"), caption=f"🎧 {word}")
-
-# ==== Кнопка "Следующее" ====
-@dp.callback_query(F.data == "next")
-async def callback_next(call: CallbackQuery):
-    await call.answer()
-    await cmd_vocab(call.message)
-
-# ==== /quiz ====
-@dp.message(Command("quiz"))
-async def cmd_quiz(message: Message):
-    async with aiosqlite.connect(DB_FILE) as db:
-        cur = await db.execute("SELECT id, word, translation FROM vocab ORDER BY RANDOM() LIMIT 1")
-        row = await cur.fetchone()
-        if not row:
-            await message.answer("Нет слов для викторины.")
-            return
-        vid, word, correct = row
-        cur = await db.execute("SELECT translation FROM vocab WHERE id != ? ORDER BY RANDOM() LIMIT 3", (vid,))
-        options = [correct] + [r[0] for r in await cur.fetchall()]
-
-    random.shuffle(options)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=opt, callback_data=f"ans:{vid}:{i}")] for i, opt in enumerate(options)
-    ])
-
-    quiz_data[f"quiz_{vid}"] = {"options": options, "correct": correct}
-    await message.answer(f"Что значит слово *{word}*?", parse_mode="Markdown", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("ans:"))
-async def callback_answer(call: CallbackQuery):
-    _, vid, idx = call.data.split(":")
-    vid = int(vid)
-    idx = int(idx)
-    data = quiz_data.get(f"quiz_{vid}")
-    if not data:
-        await call.message.answer("Ошибка викторины 😢")
-        await call.answer()
-        return
-
-    chosen = data["options"][idx]
-    correct = data["correct"]
-
-    if chosen == correct:
-        await call.message.answer("✅ Правильно!")
+@dp.callback_query(lambda c: c.data.startswith("quiz_"))
+async def callback_quiz(callback: types.CallbackQuery):
+    _, selected, correct = callback.data.split("_")
+    if selected == correct:
+        await callback.answer("✅ Верно!")
     else:
-        await call.message.answer(f"❌ Неверно. Правильный ответ: {correct}")
-    await call.answer()
+        await callback.answer(f"❌ Неверно! Правильный ответ: {correct}")
 
-# ==== ЗАПУСК ====
-async def main():
-    await init_db()
-    print("Бот запущен на сервере ✅")
-    await dp.start_polling(bot)
+# =====================
+# Flask webhook endpoint
+# =====================
+@app.post(WEBHOOK_PATH)
+async def webhook():
+    update = Update(**request.json)
+    await dp.feed_update(bot, update)
+    return "ok", 200
+
+@app.get("/")
+def index():
+    return "✅ Deutsch_me_Bot работает через webhook!"
+
+# =====================
+# Запуск
+# =====================
+async def on_startup():
+    webhook_info = await bot.get_webhook_info()
+    if webhook_info.url != WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL)
+        print(f"Webhook установлен: {WEBHOOK_URL}")
+
+def run():
+    loop = asyncio.get_event_loop()
+    loop.create_task(on_startup())
+    app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()
