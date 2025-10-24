@@ -11,7 +11,7 @@ from gtts import gTTS
 # Настройки
 # =====================
 TOKEN = os.getenv("TOKEN") or "ТВОЙ_ТОКЕН_СЮДА"
-APP_URL = os.getenv("APP_URL") or "https://deutsch-me-bot.onrender.com"
+APP_URL = os.getenv("APP_URL") or "https://deutsch-me-bot.onrender.com"  # твой Render URL
 PORT = int(os.getenv("PORT", 5000))
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"{APP_URL}{WEBHOOK_PATH}"
@@ -22,7 +22,7 @@ router = Router()
 app = Flask(__name__)
 
 # =====================
-# Данные
+# Данные для словаря и викторины
 # =====================
 vocab_list = [
     {"de": "Haus", "ru": "Дом"},
