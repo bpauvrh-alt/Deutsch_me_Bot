@@ -6,11 +6,9 @@ from aiogram.types import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from flask import Flask, request
 from gtts import gTTS
 
-# =====================
-# Настройки
-# =====================
+# ========== Настройки ==========
 TOKEN = os.getenv("TOKEN") or "ТВОЙ_ТОКЕН_СЮДА"
-APP_URL = os.getenv("APP_URL") or "https://deutsch-me-bot.onrender.com"  # замени на свой Render URL
+APP_URL = os.getenv("APP_URL") or "https://deutsch-me-bot.onrender.com"
 PORT = int(os.getenv("PORT", 5000))
 
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
@@ -20,23 +18,18 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 app = Flask(__name__)
 
-# =====================
-# Данные для словаря и викторины
-# =====================
+# ========== Данные ==========
 vocab_list = [
     {"de": "Haus", "ru": "Дом"},
     {"de": "Hund", "ru": "Собака"},
     {"de": "Katze", "ru": "Кошка"},
 ]
-
 quiz_list = [
     {"question": "Что значит 'Haus'?", "options": ["Дом", "Кошка", "Собака"], "answer": "Дом"},
     {"question": "Что значит 'Hund'?", "options": ["Кошка", "Собака", "Дом"], "answer": "Собака"},
 ]
 
-# =====================
-# Команды
-# =====================
+# ========== Команды ==========
 @dp.message(commands=["start"])
 async def cmd_start(message: types.Message):
     await message.answer("👋 Привет! Я Deutsch_me_Bot 🇩🇪\n\nКоманды:\n/vocab — изучение слов\n/quiz — викторина")
@@ -56,52 +49,57 @@ async def cmd_quiz(message: types.Message):
         markup.add(InlineKeyboardButton(opt, callback_data=f"quiz_{opt}_{q['answer']}"))
     await message.answer(q["question"], reply_markup=markup)
 
-# =====================
-# Callback кнопки
-# =====================
-@dp.callback_query(lambda c: c.data.startswith("tts_"))
+# ========== Callback кнопки ==========
+@dp.callback_query(lambda c: c.data and c.data.startswith("tts_"))
 async def callback_tts(callback: types.CallbackQuery):
     word = callback.data[4:]
     tts = gTTS(text=word, lang="de")
     filename = f"audio_{word}.mp3"
     tts.save(filename)
     await callback.message.answer_audio(types.FSInputFile(filename))
-    os.remove(filename)
+    try:
+        os.remove(filename)
+    except Exception:
+        pass
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith("quiz_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("quiz_"))
 async def callback_quiz(callback: types.CallbackQuery):
-    _, selected, correct = callback.data.split("_")
+    _, selected, correct = callback.data.split("_", 2)
     if selected == correct:
         await callback.answer("✅ Верно!")
     else:
         await callback.answer(f"❌ Неверно! Правильный ответ: {correct}")
 
-# =====================
-# Flask webhook endpoint
-# =====================
-@app.post(WEBHOOK_PATH)
-async def webhook():
-    update = Update(**request.json)
-    await dp.feed_update(bot, update)
-    return "ok", 200
+# ========== Flask webhook endpoint ==========
+# Сделаем синхронный обработчик: поставим задачу в asyncio loop
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    data = request.get_json(force=True)
+    update = Update(**data)
+    # ставим в очередь обработки в asyncio loop
+    asyncio.get_event_loop().create_task(dp.process_update(update))
+    return "OK", 200
 
-@app.get("/")
+@app.route("/", methods=["GET"])
 def index():
-    return "✅ Deutsch_me_Bot работает через webhook!"
+    return "✅ Deutsch_me_Bot работает через webhook!", 200
 
-# =====================
-# Запуск
-# =====================
+# ========== Установка webhook при старте ==========
 async def on_startup():
+    # проверяем webhook info и устанавливаем, если нужно
     webhook_info = await bot.get_webhook_info()
     if webhook_info.url != WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
         print(f"Webhook установлен: {WEBHOOK_URL}")
+    else:
+        print("Webhook уже установлен:", webhook_info.url)
 
 def run():
+    # здесь мы синхронно запускаем on_startup(), чтобы webhook точно установился
     loop = asyncio.get_event_loop()
-    loop.create_task(on_startup())
+    loop.run_until_complete(on_startup())
+    # затем запускаем Flask (blocking)
     app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
